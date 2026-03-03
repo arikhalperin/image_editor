@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.png
+# Allow test fixture images to be committed
+!tests/fixtures/*.png
 .Python
 build/
 develop-eggs/
@@ -23,9 +26,11 @@ wheels/
 output_frames/
 edited_frames/
 .DS_Store
+.idea/
 .venv/
 venv/
 ENV/
 env/
 models/
 sam_weights/
+.github/copilot-instructions.md

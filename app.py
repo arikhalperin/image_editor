@@ -60,6 +60,8 @@ if "last_frame_idx" not in st.session_state:
     st.session_state.last_frame_idx = None
 if "lockon_click_pending" not in st.session_state:
     st.session_state.lockon_click_pending = None  # (x, y) click on character for lockon
+if "lockon_preview_key" not in st.session_state:
+    st.session_state.lockon_preview_key = 0  # increment after Lockon so next click registers
 
 
 # Sidebar
@@ -358,7 +360,16 @@ if st.session_state.video_processor is not None:
         
         elif selection_mode == "Coarse Selection":
             st.markdown("**Define rectangular area around the character**")
-            
+
+            # Sync sliders to coarse_box before widgets are created (e.g. after Lockon)
+            if st.session_state.get("sync_sliders_to_coarse_box") and st.session_state.coarse_box is not None:
+                b = st.session_state.coarse_box
+                st.session_state["coarse_x_start"] = b[0]
+                st.session_state["coarse_y_start"] = b[1]
+                st.session_state["coarse_x_end"] = b[2]
+                st.session_state["coarse_y_end"] = b[3]
+                st.session_state["sync_sliders_to_coarse_box"] = False
+
             # Create helper text
             st.info("📍 Use the sliders below to define the rectangular selection area")
             
@@ -395,25 +406,30 @@ if st.session_state.video_processor is not None:
                     value=st.session_state.video_processor.height * 3 // 4,
                     key="coarse_y_end"
                 )
-            
+
             # Create preview with rectangle drawn
             frame_preview = frame_rgb.copy()
             x_min, x_max = min(int(x_start), int(x_end)), max(int(x_start), int(x_end))
             y_min, y_max = min(int(y_start), int(y_end)), max(int(y_start), int(y_end))
-            
-            # Draw rectangle on preview
-            cv2.rectangle(frame_preview, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+
+            # Always draw the green rectangle from sliders so moving sliders updates the box (single source of truth)
+            cv2.rectangle(frame_preview, (x_min, y_min), (x_max, y_max), (0, 255, 0), 3)
+            if st.session_state.coarse_box is not None:
+                cv2.putText(frame_preview, "Coarse selection", (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             # Draw lockon click point if set
             if st.session_state.lockon_click_pending is not None:
                 lx, ly = st.session_state.lockon_click_pending
                 cv2.circle(frame_preview, (int(lx), int(ly)), 8, (0, 255, 255), 2)
                 cv2.putText(frame_preview, "Lockon", (int(lx) + 10, int(ly)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-            st.caption("**Lockon:** 1) Click on the character in the image below. 2) Press the **Lockon** button. You can try again: click a new spot and press Lockon again.")
-            coords_coarse = streamlit_image_coordinates(Image.fromarray(frame_preview), key="coarse_preview")
+            st.caption("**Lockon:** 1) Click on the character in the image below. 2) Press the **Lockon** button. The green frame will update to the character. Click a new spot and press Lockon again to retry.")
+            coords_coarse = streamlit_image_coordinates(Image.fromarray(frame_preview), key=f"coarse_preview_{st.session_state.lockon_preview_key}")
             if coords_coarse is not None:
-                st.session_state.lockon_click_pending = (int(coords_coarse["x"]), int(coords_coarse["y"]))
-                st.rerun()
+                new_point = (int(coords_coarse["x"]), int(coords_coarse["y"]))
+                # Only rerun when the click is new so the Lockon button can run (component may re-emit same coords)
+                if new_point != st.session_state.lockon_click_pending:
+                    st.session_state.lockon_click_pending = new_point
+                    st.rerun()
 
             if st.session_state.lockon_click_pending is not None:
                 lx, ly = st.session_state.lockon_click_pending
@@ -447,6 +463,7 @@ if st.session_state.video_processor is not None:
             with col_buttons3:
                 if st.button("🗑️ Clear Box"):
                     st.session_state.coarse_box = None
+                    st.session_state["sync_sliders_to_coarse_box"] = False
                     st.session_state.fuzzy_selections = []
                     st.session_state.fuzzy_click_points = []
                     st.session_state.combined_mask = None
@@ -473,10 +490,13 @@ if st.session_state.video_processor is not None:
                         )
                     if box is not None:
                         st.session_state.coarse_box = box
+                        # Sync sliders on next run (cannot set widget keys after they're instantiated)
+                        st.session_state["sync_sliders_to_coarse_box"] = True
                         st.session_state.fuzzy_selections = []
                         st.session_state.fuzzy_click_points = []
                         st.session_state.combined_mask = None
-                        st.success("✅ Lockon set coarse box! Switch to Fuzzy Select to add selections, or click a new spot and press Lockon again to retry.")
+                        st.session_state.lockon_preview_key += 1  # fresh image so next click registers
+                        st.success("✅ Lockon set coarse box! The green frame should now wrap the character. Click a new spot and press Lockon again to retry.")
                     else:
                         st.error("Lockon failed. Try clicking directly on the character and press Lockon again.")
                     st.rerun()

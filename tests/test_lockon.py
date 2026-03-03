@@ -9,6 +9,10 @@ from utils.lockon import compute_lockon_box, is_valid_lockon_box
 
 # AppTest requires running from project root so app.py is found
 APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
+# Optional: put your image at tests/fixtures/lockon_test_image.png to test lockon on it
+LOCKON_TEST_IMAGE_PATH = Path(__file__).resolve().parent / "fixtures" / "lockon_test_image.png"
+# Image showing desired lockon state (green box + sliders); used to test full lockon → UI sync
+LOCKON_EXPECTED_STATE_IMAGE_PATH = Path(__file__).resolve().parent / "fixtures" / "lockon_expected_state.png"
 
 
 # --- Contract: lockon module ---
@@ -157,3 +161,140 @@ def test_lockon_flow_sets_coarse_box_when_mock_returns_box(mock_video_processor)
         # Mock must have been called when Lockon button was clicked
         assert mock_compute_lockon.called, "compute_lockon_box should be called when Lockon is clicked"
         assert at.session_state["coarse_box"] == (50, 50, 200, 200)
+
+
+def test_lockon_with_pending_click_does_not_show_no_click_yet(mock_video_processor):
+    """When user has clicked the image (lockon_click_pending set), pressing Lockon must not show 'No click yet'."""
+    from streamlit.testing.v1 import AppTest
+
+    with patch("utils.lockon.compute_lockon_box") as mock_compute_lockon:
+        mock_compute_lockon.return_value = (80, 80, 200, 200)
+
+        at = AppTest.from_file(str(APP_PATH))
+        at.session_state["video_processor"] = mock_video_processor
+        at.session_state["current_frame"] = np.zeros((480, 640, 3), dtype=np.uint8)
+        at.session_state["current_frame_idx"] = 0
+        at.session_state["last_frame_idx"] = 0
+        at.session_state["lockon_click_pending"] = (100, 100)  # user already clicked
+        at.run()
+        assert not at.exception
+
+        at.radio[0].set_value("Coarse Selection").run()
+        assert not at.exception
+
+        lockon_buttons = [b for b in at.button if b.label and "Lockon" in b.label]
+        assert len(lockon_buttons) >= 1
+        lockon_buttons[0].click().run()
+        assert not at.exception
+
+        # Must not show "No click yet" when a click was already set
+        warning_texts = [w.value for w in at.warning] if hasattr(at, "warning") and at.warning else []
+        assert not any("No click yet" in str(t) for t in warning_texts), (
+            "Lockon should not show 'No click yet' when lockon_click_pending is set"
+        )
+
+
+def test_lockon_returns_valid_box_on_image():
+    """compute_lockon_box returns a valid box when given an image and a mock selector (e.g. from lockon_test_image)."""
+    try:
+        import cv2
+    except ImportError:
+        pytest.skip("opencv-python not installed")
+    if LOCKON_TEST_IMAGE_PATH.exists():
+        frame = cv2.imread(str(LOCKON_TEST_IMAGE_PATH))
+        if frame is None:
+            pytest.skip(f"Could not load image at {LOCKON_TEST_IMAGE_PATH}")
+        # Click near center of image (on the character in the provided image)
+        height, width = frame.shape[:2]
+        point = (width // 2, height // 2)
+    else:
+        # Fallback: synthetic frame and point
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        frame[200:280, 300:340] = (0, 200, 0)  # small green blob
+        point = (320, 240)
+
+    # Mock selector: returns a small mask around the point so lockon has something to box
+    def mock_fuzzy_select(img, pt):
+        h, w = img.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        x, y = int(pt[0]), int(pt[1])
+        r = 30
+        y0, y1 = max(0, y - r), min(h, y + r)
+        x0, x1 = max(0, x - r), min(w, x + r)
+        mask[y0:y1, x0:x1] = 255
+        return mask
+
+    mock_selector = MagicMock()
+    mock_selector.fuzzy_select = mock_fuzzy_select
+
+    box = compute_lockon_box(frame, point, selector=mock_selector)
+    assert box is not None, "compute_lockon_box should return a box when selector returns a valid mask"
+    frame_shape = frame.shape[:2]  # (height, width)
+    assert is_valid_lockon_box(box, frame_shape, point), (
+        "returned box must be valid: contain point and be within frame bounds"
+    )
+
+
+def test_lockon_state_reflected_in_image_and_sliders(mock_video_processor):
+    """After Lockon, coarse_box is set and sliders (X Start, Y Start, X End, Y End) reflect the lockon box."""
+    try:
+        import cv2
+    except ImportError:
+        pytest.skip("opencv-python not installed")
+    if not LOCKON_EXPECTED_STATE_IMAGE_PATH.exists():
+        pytest.skip(f"Expected state image not found: {LOCKON_EXPECTED_STATE_IMAGE_PATH}")
+    frame = cv2.imread(str(LOCKON_EXPECTED_STATE_IMAGE_PATH))
+    if frame is None:
+        pytest.skip(f"Could not load image at {LOCKON_EXPECTED_STATE_IMAGE_PATH}")
+    height, width = frame.shape[:2]
+    # Desired lockon box from the provided screenshot (green box around goblin)
+    expected_box = (514, 247, 858, 521)
+    # Point on the character used to trigger lockon (inside the expected box)
+    click_point = ((expected_box[0] + expected_box[2]) // 2, (expected_box[1] + expected_box[3]) // 2)
+
+    mock_video_processor.width = width
+    mock_video_processor.height = height
+    mock_video_processor.get_frame.return_value = frame
+
+    from streamlit.testing.v1 import AppTest
+
+    with patch("utils.lockon.compute_lockon_box") as mock_compute_lockon:
+        mock_compute_lockon.return_value = expected_box
+
+        at = AppTest.from_file(str(APP_PATH))
+        at.session_state["video_processor"] = mock_video_processor
+        at.session_state["current_frame"] = frame
+        at.session_state["current_frame_idx"] = 0
+        at.session_state["last_frame_idx"] = 0
+        at.session_state["lockon_click_pending"] = click_point
+        at.run()
+        assert not at.exception
+
+        at.radio[0].set_value("Coarse Selection").run()
+        assert not at.exception
+
+        lockon_buttons = [b for b in at.button if b.label and "Lockon" in b.label]
+        assert len(lockon_buttons) >= 1, "Lockon button not found"
+        lockon_buttons[0].click().run()
+        assert not at.exception
+
+        # Coarse box must be set to the lockon result
+        assert at.session_state["coarse_box"] == expected_box, (
+            "coarse_box should equal the lockon result so the green frame updates"
+        )
+
+        # Sliders must reflect the lockon box (synced on next run)
+        at.run()
+        assert not at.exception
+        assert "coarse_x_start" in at.session_state and at.session_state["coarse_x_start"] == expected_box[0], (
+            "X Start slider should match coarse box"
+        )
+        assert "coarse_y_start" in at.session_state and at.session_state["coarse_y_start"] == expected_box[1], (
+            "Y Start slider should match coarse box"
+        )
+        assert "coarse_x_end" in at.session_state and at.session_state["coarse_x_end"] == expected_box[2], (
+            "X End slider should match coarse box"
+        )
+        assert "coarse_y_end" in at.session_state and at.session_state["coarse_y_end"] == expected_box[3], (
+            "Y End slider should match coarse box"
+        )
